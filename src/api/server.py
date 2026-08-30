@@ -1,13 +1,15 @@
+import os
 import time
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 
 from phe import paillier
 from src.crypto.serializer import serialize_payload, deserialize_payload
 from src.server.aggregator import aggregate_ciphertexts
+from src.model.logistic_regression import evaluate
 
 app = FastAPI(title="FedVeil Coordinator Engine", version="1.0.0")
 
@@ -20,12 +22,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Load test dataset for model evaluation on server
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+TEST_DATA_PATH = os.path.join(BASE_DIR, "data", "server_test.npz")
+
+if os.path.exists(TEST_DATA_PATH):
+    test_data = np.load(TEST_DATA_PATH)
+    X_test, y_test = test_data["X"], test_data["y"]
+    VECTOR_SIZE = X_test.shape[1] + 1  # n_features + bias
+else:
+    X_test, y_test = None, None
+    VECTOR_SIZE = 31
+
 # Key custody: coordinator holds Paillier keypair
 pub_key, priv_key = paillier.generate_paillier_keypair(n_length=1024)
 
-# Global weights placeholder
-VECTOR_SIZE = 4
-current_weights = np.array([0.5, -0.2, 1.0, 0.8][:VECTOR_SIZE])
+# Global weights initialization
+current_weights = np.zeros(VECTOR_SIZE)
 
 # Submissions buffer for current active round: {client_id: serialized_payload}
 current_round_submissions: Dict[str, str] = {}
@@ -37,6 +50,7 @@ telemetry_store: Dict[str, Any] = {
     "current_round": 1,
     "expected_clients": 3,
     "placeholder_epsilon": 0.0,
+    "current_weights": [round(float(w), 4) for w in current_weights],
     "rounds_data": [],
     "clients_status": [
         {"id": i, "name": f"Client Node {i}", "status": "Ready", "last_latency_ms": 0.0}
@@ -63,7 +77,7 @@ class UpdateSubmission(BaseModel):
 class CoordinatorConfigRequest(BaseModel):
     num_clients: int = 3
     num_rounds: int = 5
-    vector_size: int = 4
+    vector_size: int = VECTOR_SIZE
 
 
 @app.get("/api/telemetry")
@@ -89,7 +103,7 @@ def submit_update(submission: UpdateSubmission):
     """
     Accepts one client's serialized encrypted payload for the current round.
     Once submissions from expected clients are received, aggregates, decrypts,
-    updates telemetry_store, and advances the round.
+    updates telemetry_store, evaluates the real model, and advances the round.
     """
     global current_weights, current_round_submissions, telemetry_store
 
@@ -148,16 +162,26 @@ def submit_update(submission: UpdateSubmission):
         decrypted_sum = np.array([priv_key.decrypt(x) for x in encrypted_sum])
         averaged_delta = decrypted_sum / expected_count
         current_weights = current_weights + averaged_delta
+        telemetry_store["current_weights"] = [round(float(w), 4) for w in current_weights]
+
+        # Real test set evaluation
+        if X_test is not None and y_test is not None:
+            acc, loss = evaluate(X_test, y_test, current_weights)
+            real_acc = round(acc, 2)
+            real_loss = round(loss, 4)
+        else:
+            real_acc = None
+            real_loss = None
 
         # TODO: This is a placeholder increment until a real DP accountant (e.g., Opacus/RDP) is integrated.
         new_epsilon = telemetry_store["placeholder_epsilon"] + 0.25
         telemetry_store["placeholder_epsilon"] = round(new_epsilon, 3)
 
-        # Record telemetry metrics for the completed round (no fabricated loss/acc)
+        # Record telemetry metrics for the completed round
         telemetry_store["rounds_data"].append({
             "round": active_round,
-            "accuracy": None,
-            "loss": None,
+            "accuracy": real_acc,
+            "loss": real_loss,
             "placeholder_epsilon": round(new_epsilon, 2),
             "server_agg_ms": agg_ms,
             "global_weights": [round(float(w), 4) for w in current_weights]
@@ -179,7 +203,9 @@ def submit_update(submission: UpdateSubmission):
             "status": "aggregated",
             "completed_round": active_round,
             "current_round": telemetry_store["current_round"],
-            "agg_ms": agg_ms
+            "agg_ms": agg_ms,
+            "accuracy": real_acc,
+            "loss": real_loss
         }
 
     return {
@@ -199,19 +225,14 @@ def configure_simulation(params: CoordinatorConfigRequest):
     global current_weights, current_round_submissions, telemetry_store
 
     current_round_submissions.clear()
-    current_weights = np.array([0.5, -0.2, 1.0, 0.8][:params.vector_size])
-    if len(current_weights) < params.vector_size:
-        current_weights = np.pad(
-            current_weights,
-            (0, params.vector_size - len(current_weights)),
-            constant_values=0.5
-        )
+    current_weights = np.zeros(VECTOR_SIZE)
 
     telemetry_store["status"] = "waiting_for_updates"
     telemetry_store["total_rounds"] = params.num_rounds
     telemetry_store["current_round"] = 1
     telemetry_store["expected_clients"] = params.num_clients
     telemetry_store["placeholder_epsilon"] = 0.0
+    telemetry_store["current_weights"] = [round(float(w), 4) for w in current_weights]
     telemetry_store["rounds_data"] = []
     telemetry_store["clients_status"] = [
         {"id": i, "name": f"Client Node {i}", "status": "Waiting for Round Update", "last_latency_ms": 0.0}
