@@ -79,7 +79,7 @@ export default function App() {
           </div>
           <div className="bg-white p-4 rounded-lg border border-gray-200 text-center shadow-sm">
             <div className="text-sm text-gray-500 mb-1">Privacy Budget (ε)</div>
-            <div className="text-xl font-bold text-orange-500">{telemetry?.cumulative_epsilon?.toFixed(2) || '0.00'}</div>
+            <div className="text-xl font-bold text-orange-500">{(telemetry?.placeholder_epsilon ?? telemetry?.cumulative_epsilon ?? 0).toFixed(2)}</div>
           </div>
           <div className="bg-white p-4 rounded-lg border border-gray-200 text-center shadow-sm">
             <div className="text-sm text-gray-500 mb-1">Accuracy</div>
