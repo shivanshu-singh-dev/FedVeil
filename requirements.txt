@@ -1,0 +1,11 @@
+torch
+torchvision
+numpy
+phe
+opacus
+fastapi
+uvicorn
+pydantic
+python-multipart
+scikit-learn
+matplotlib
