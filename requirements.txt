@@ -6,3 +6,4 @@ pydantic
 python-multipart
 scikit-learn
 pytest
+psycopg2-binary

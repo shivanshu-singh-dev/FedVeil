@@ -12,8 +12,12 @@ from src.crypto.serializer import serialize_payload, deserialize_payload
 from src.server.aggregator import aggregate_ciphertexts
 from src.model.logistic_regression import evaluate
 from src.dp.privacy_accountant import compute_epsilon
+from src.storage.db_connection import init_tables
 from src.storage.privacy_log_db import log_epsilon, get_cumulative_epsilon, get_all_privacy_logs
 from src.storage.client_registry_db import register_client, is_valid_client, list_clients
+
+# Initialize database tables in RDS Postgres on startup
+init_tables()
 
 app = FastAPI(title="FedVeil Coordinator Engine", version="1.0.0")
 

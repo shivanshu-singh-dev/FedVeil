@@ -12,9 +12,6 @@ frontend/dist/
 # Environment & Local Secrets
 .env
 
-# Local Database Files
-data/privacy_log.db
-
 # OS Specific
 .DS_Store
 Thumbs.db

@@ -1,33 +1,13 @@
-import os
-import sqlite3
 import secrets
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DB_PATH = os.path.join(BASE_DIR, "data", "privacy_log.db")
-
-
-def get_db_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
-    """Returns a SQLite connection and ensures the clients table exists."""
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    with conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS clients (
-                client_id TEXT PRIMARY KEY,
-                name TEXT,
-                api_key TEXT,
-                registered_at TEXT
-            )
-        """)
-    return conn
+from typing import List, Dict, Any
+import psycopg2.errors
+from src.storage.db_connection import get_connection
 
 
-def register_client(client_id: str, name: str, db_path: str = DB_PATH) -> str:
+def register_client(client_id: str, name: str) -> str:
     """
-    Registers a client with a new random 16-byte hex API key.
+    Registers a client with a new random 16-byte hex API key in RDS Postgres.
     Raises ValueError if client_id already exists.
     Returns the generated api_key.
     """
@@ -39,14 +19,15 @@ def register_client(client_id: str, name: str, db_path: str = DB_PATH) -> str:
     api_key = secrets.token_hex(16)
     registered_at = datetime.now(timezone.utc).isoformat()
 
-    conn = get_db_connection(db_path)
+    conn = get_connection()
     try:
         with conn:
-            conn.execute("""
-                INSERT INTO clients (client_id, name, api_key, registered_at)
-                VALUES (?, ?, ?, ?)
-            """, (cid_str, name_str, api_key, registered_at))
-    except sqlite3.IntegrityError:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO clients (client_id, name, api_key, registered_at)
+                    VALUES (%s, %s, %s, %s)
+                """, (cid_str, name_str, api_key, registered_at))
+    except (psycopg2.errors.UniqueViolation, psycopg2.IntegrityError):
         conn.close()
         raise ValueError(f"Client '{cid_str}' is already registered.")
     finally:
@@ -55,20 +36,22 @@ def register_client(client_id: str, name: str, db_path: str = DB_PATH) -> str:
     return api_key
 
 
-def is_valid_client(client_id: str, api_key: str, db_path: str = DB_PATH) -> bool:
-    """Checks if the client_id exists and the api_key matches."""
+def is_valid_client(client_id: str, api_key: str) -> bool:
+    """Checks if the client_id exists in RDS Postgres and the api_key matches."""
     if not client_id or not api_key:
         return False
 
     cid_str = str(client_id).strip()
-    conn = get_db_connection(db_path)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT api_key FROM clients
-        WHERE client_id = ?
-    """, (cid_str,))
-    row = cursor.fetchone()
-    conn.close()
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT api_key FROM clients
+                WHERE client_id = %s
+            """, (cid_str,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
 
     if row is None:
         return False
@@ -77,20 +60,22 @@ def is_valid_client(client_id: str, api_key: str, db_path: str = DB_PATH) -> boo
     return secrets.compare_digest(stored_key, str(api_key).strip())
 
 
-def list_clients(db_path: str = DB_PATH) -> List[Dict[str, Any]]:
+def list_clients() -> List[Dict[str, Any]]:
     """
-    Returns all registered clients (client_id, name, registered_at).
+    Returns all registered clients from RDS Postgres (client_id, name, registered_at).
     Never includes api_key in the returned dictionary.
     """
-    conn = get_db_connection(db_path)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT client_id, name, registered_at
-        FROM clients
-        ORDER BY registered_at ASC
-    """)
-    rows = cursor.fetchall()
-    conn.close()
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT client_id, name, registered_at
+                FROM clients
+                ORDER BY registered_at ASC
+            """)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
 
     return [
         {
