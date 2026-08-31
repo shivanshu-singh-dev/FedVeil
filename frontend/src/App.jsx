@@ -75,7 +75,7 @@ export default function App() {
         <div className="grid grid-cols-4 gap-4">
           <div className="bg-white p-4 rounded-lg border border-gray-200 text-center shadow-sm">
             <div className="text-sm text-gray-500 mb-1">Round</div>
-            <div className="text-xl font-bold">{telemetry?.current_round || 0} / {telemetry?.total_rounds || 6}</div>
+            <div className="text-xl font-bold">{telemetry?.current_round || 0} / {telemetry?.total_rounds || 0}</div>
           </div>
           <div className="bg-white p-4 rounded-lg border border-gray-200 text-center shadow-sm">
             <div className="text-sm text-gray-500 mb-1">Privacy Budget (ε)</div>
@@ -93,7 +93,10 @@ export default function App() {
 
         {/* Client Status List */}
         <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm">
-          <h2 className="text-lg font-bold mb-4 border-b pb-2">Client Node Status</h2>
+          <div className="flex justify-between items-center mb-4 border-b pb-2">
+            <h2 className="text-lg font-bold">Client Node Status</h2>
+            <span className="text-sm text-gray-500 font-medium">({telemetry?.clients_status?.length || 0} Active)</span>
+          </div>
           <div className="space-y-3">
             {(telemetry?.clients_status || []).map(client => (
               <div key={client.id} className="flex justify-between items-center bg-gray-50 p-3 rounded border border-gray-100">
@@ -101,7 +104,7 @@ export default function App() {
                 <span className="text-sm bg-blue-100 text-blue-800 px-3 py-1 rounded-full">{client.status}</span>
               </div>
             ))}
-            {!telemetry?.clients_status?.length && <p className="text-sm text-gray-400">Waiting for simulation to start...</p>}
+            {!telemetry?.clients_status?.length && <p className="text-sm text-gray-400">Waiting for registered clients to submit updates...</p>}
           </div>
         </div>
 

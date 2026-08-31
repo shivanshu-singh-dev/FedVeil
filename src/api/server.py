@@ -1,7 +1,8 @@
 import os
 import time
+import secrets
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -12,6 +13,7 @@ from src.server.aggregator import aggregate_ciphertexts
 from src.model.logistic_regression import evaluate
 from src.dp.privacy_accountant import compute_epsilon
 from src.storage.privacy_log_db import log_epsilon, get_cumulative_epsilon, get_all_privacy_logs
+from src.storage.client_registry_db import register_client, is_valid_client, list_clients
 
 app = FastAPI(title="FedVeil Coordinator Engine", version="1.0.0")
 
@@ -23,6 +25,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Admin authentication secret
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "dev-admin-key-change-me")
+
+
+def verify_admin_key(x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")):
+    """Validates the X-Admin-Key header against ADMIN_SECRET."""
+    if not x_admin_key or not secrets.compare_digest(x_admin_key, ADMIN_SECRET):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized: Invalid or missing X-Admin-Key header."
+        )
+    return x_admin_key
+
 
 # Load test dataset for model evaluation on server
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -54,10 +70,7 @@ telemetry_store: Dict[str, Any] = {
     "epsilon_note": "See /api/privacy-log for real per-client epsilon values",
     "current_weights": [round(float(w), 4) for w in current_weights],
     "rounds_data": [],
-    "clients_status": [
-        {"id": i, "name": f"Client Node {i}", "status": "Ready", "last_latency_ms": 0.0}
-        for i in range(1, 4)
-    ],
+    "clients_status": [],
     "sample_payload_inspect": {
         "raw_slice": [],
         "ciphertext_preview": ""
@@ -68,8 +81,14 @@ telemetry_store: Dict[str, Any] = {
 }
 
 
+class RegisterClientRequest(BaseModel):
+    client_id: str
+    name: str
+
+
 class UpdateSubmission(BaseModel):
     client_id: Any
+    api_key: str
     round: int
     payload: str
     clip_bound: Optional[float] = 1.0
@@ -109,15 +128,54 @@ def get_privacy_log():
     return get_all_privacy_logs()
 
 
+@app.post("/api/admin/register-client")
+def admin_register_client(
+    req: RegisterClientRequest,
+    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")
+):
+    """Admin endpoint to register a new client and generate its API key."""
+    verify_admin_key(x_admin_key)
+    try:
+        api_key = register_client(client_id=req.client_id, name=req.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "status": "registered",
+        "client_id": req.client_id,
+        "name": req.name,
+        "api_key": api_key
+    }
+
+
+@app.get("/api/admin/clients")
+def admin_get_clients(
+    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")
+):
+    """Admin endpoint to list all registered clients with cumulative epsilon totals."""
+    verify_admin_key(x_admin_key)
+    clients = list_clients()
+    for c in clients:
+        c["cumulative_epsilon"] = get_cumulative_epsilon(c["client_id"])
+    return clients
+
+
 @app.post("/api/submit-update")
 def submit_update(submission: UpdateSubmission):
     """
     Accepts one client's serialized encrypted payload for the current round.
+    Authenticates client credentials before processing.
     Once submissions from expected clients are received, aggregates, decrypts,
     persists per-client privacy accounting, updates telemetry_store, evaluates
     the real model, and advances the round.
     """
     global current_weights, current_round_submissions, telemetry_store
+
+    # 1. Authenticate client credentials before processing
+    if not is_valid_client(submission.client_id, submission.api_key):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or unregistered client credentials."
+        )
 
     active_round = telemetry_store["current_round"]
 
@@ -128,6 +186,7 @@ def submit_update(submission: UpdateSubmission):
         )
 
     cid_str = str(submission.client_id)
+    is_resubmission = cid_str in current_round_submissions
     current_round_submissions[cid_str] = submission
 
     # Update or add client in clients_status
@@ -232,14 +291,16 @@ def submit_update(submission: UpdateSubmission):
             "current_round": telemetry_store["current_round"],
             "agg_ms": agg_ms,
             "accuracy": real_acc,
-            "loss": real_loss
+            "loss": real_loss,
+            "replaced_previous_submission": is_resubmission
         }
 
     return {
         "status": "accepted",
         "round": active_round,
         "received": received_count,
-        "expected": expected_count
+        "expected": expected_count,
+        "replaced_previous_submission": is_resubmission
     }
 
 
@@ -261,10 +322,7 @@ def configure_simulation(params: CoordinatorConfigRequest):
     telemetry_store["epsilon_note"] = "See /api/privacy-log for real per-client epsilon values"
     telemetry_store["current_weights"] = [round(float(w), 4) for w in current_weights]
     telemetry_store["rounds_data"] = []
-    telemetry_store["clients_status"] = [
-        {"id": i, "name": f"Client Node {i}", "status": "Waiting for Round Update", "last_latency_ms": 0.0}
-        for i in range(1, params.num_clients + 1)
-    ]
+    telemetry_store["clients_status"] = []
     telemetry_store["sample_payload_inspect"] = {
         "raw_slice": [],
         "ciphertext_preview": ""

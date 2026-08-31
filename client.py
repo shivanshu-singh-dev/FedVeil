@@ -40,6 +40,7 @@ def submit_client_update(server_url: str, payload_data: dict):
 
 def run_client_round(
     client_id: int | str,
+    api_key: str,
     server_url: str,
     client_data_path: Optional[str] = None,
     target_round: Optional[int] = None,
@@ -92,9 +93,10 @@ def run_client_round(
     compute_duration_ms = round((time.time() - t0) * 1000, 2)
     print(f"[Client {client_id}] Training & encryption completed in {compute_duration_ms} ms. Submitting payload...")
 
-    # 7. Post update to coordinator
+    # 7. Post update to coordinator with authentication api_key
     submission_data = {
         "client_id": client_id,
+        "api_key": api_key,
         "round": active_round,
         "payload": serialized_payload,
         "clip_bound": clip_bound,
@@ -111,6 +113,7 @@ def run_client_round(
 def main():
     parser = argparse.ArgumentParser(description="FedVeil Standalone Federated Client")
     parser.add_argument("--id", type=str, default="1", help="Client identifier (default: 1)")
+    parser.add_argument("--api-key", type=str, required=True, help="Client API key for authentication")
     parser.add_argument("--server", type=str, default="http://127.0.0.1:8000", help="Coordinator URL")
     parser.add_argument("--client-data", type=str, default=None, help="Path to client .npz data (default: data/client_{id}.npz)")
     parser.add_argument("--epochs", type=int, default=5, help="Local training epochs (default: 5)")
@@ -128,6 +131,7 @@ def main():
     if not args.loop:
         run_client_round(
             client_id=args.id,
+            api_key=args.api_key,
             server_url=args.server,
             client_data_path=client_data,
             target_round=args.round,
@@ -152,6 +156,7 @@ def main():
                 if current_round > last_participated_round and status in ("waiting_for_updates", "running", "idle"):
                     run_client_round(
                         client_id=args.id,
+                        api_key=args.api_key,
                         server_url=args.server,
                         client_data_path=client_data,
                         target_round=current_round,
