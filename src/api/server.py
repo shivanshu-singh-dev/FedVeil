@@ -10,6 +10,8 @@ from phe import paillier
 from src.crypto.serializer import serialize_payload, deserialize_payload
 from src.server.aggregator import aggregate_ciphertexts
 from src.model.logistic_regression import evaluate
+from src.dp.privacy_accountant import compute_epsilon
+from src.storage.privacy_log_db import log_epsilon, get_cumulative_epsilon, get_all_privacy_logs
 
 app = FastAPI(title="FedVeil Coordinator Engine", version="1.0.0")
 
@@ -40,8 +42,8 @@ pub_key, priv_key = paillier.generate_paillier_keypair(n_length=1024)
 # Global weights initialization
 current_weights = np.zeros(VECTOR_SIZE)
 
-# Submissions buffer for current active round: {client_id: serialized_payload}
-current_round_submissions: Dict[str, str] = {}
+# Submissions buffer for current active round: {client_id: UpdateSubmission}
+current_round_submissions: Dict[str, Any] = {}
 
 # In-memory store for frontend and client telemetry
 telemetry_store: Dict[str, Any] = {
@@ -49,7 +51,7 @@ telemetry_store: Dict[str, Any] = {
     "total_rounds": 5,
     "current_round": 1,
     "expected_clients": 3,
-    "placeholder_epsilon": 0.0,
+    "epsilon_note": "See /api/privacy-log for real per-client epsilon values",
     "current_weights": [round(float(w), 4) for w in current_weights],
     "rounds_data": [],
     "clients_status": [
@@ -70,6 +72,9 @@ class UpdateSubmission(BaseModel):
     client_id: Any
     round: int
     payload: str
+    clip_bound: Optional[float] = 1.0
+    noise_scale: Optional[float] = 0.05
+    delta: Optional[float] = 1e-5
     raw_slice_preview: Optional[List[float]] = None
     compute_ms: Optional[float] = None
 
@@ -98,12 +103,19 @@ def get_public_key():
     }
 
 
+@app.get("/api/privacy-log")
+def get_privacy_log():
+    """Returns all rows from the privacy_log table as JSON, most recent first."""
+    return get_all_privacy_logs()
+
+
 @app.post("/api/submit-update")
 def submit_update(submission: UpdateSubmission):
     """
     Accepts one client's serialized encrypted payload for the current round.
     Once submissions from expected clients are received, aggregates, decrypts,
-    updates telemetry_store, evaluates the real model, and advances the round.
+    persists per-client privacy accounting, updates telemetry_store, evaluates
+    the real model, and advances the round.
     """
     global current_weights, current_round_submissions, telemetry_store
 
@@ -116,7 +128,7 @@ def submit_update(submission: UpdateSubmission):
         )
 
     cid_str = str(submission.client_id)
-    current_round_submissions[cid_str] = submission.payload
+    current_round_submissions[cid_str] = submission
 
     # Update or add client in clients_status
     client_entry = next((c for c in telemetry_store["clients_status"] if str(c["id"]) == cid_str), None)
@@ -152,8 +164,8 @@ def submit_update(submission: UpdateSubmission):
 
         # Deserialization & HE Aggregation
         deserialized_vectors = [
-            deserialize_payload(payload)[1]
-            for payload in current_round_submissions.values()
+            deserialize_payload(sub.payload)[1]
+            for sub in current_round_submissions.values()
         ]
         encrypted_sum = aggregate_ciphertexts(deserialized_vectors)
         agg_ms = round((time.time() - t0_agg) * 1000, 2)
@@ -173,16 +185,31 @@ def submit_update(submission: UpdateSubmission):
             real_acc = None
             real_loss = None
 
-        # TODO: This is a placeholder increment until a real DP accountant (e.g., Opacus/RDP) is integrated.
-        new_epsilon = telemetry_store["placeholder_epsilon"] + 0.25
-        telemetry_store["placeholder_epsilon"] = round(new_epsilon, 3)
+        # Real Privacy Accounting per client -> SQLite log
+        for cid, sub in current_round_submissions.items():
+            clip_b = sub.clip_bound if sub.clip_bound is not None else 1.0
+            noise_s = sub.noise_scale if sub.noise_scale is not None else 0.05
+            delta_val = sub.delta if sub.delta is not None else 1e-5
+
+            eps_round = compute_epsilon(clip_b, noise_s, delta_val)
+            prior_cum_eps = get_cumulative_epsilon(cid)
+            new_cum_eps = prior_cum_eps + eps_round
+
+            log_epsilon(
+                client_id=cid,
+                round=active_round,
+                epsilon_this_round=eps_round,
+                cumulative_epsilon=new_cum_eps,
+                clip_bound=clip_b,
+                noise_scale=noise_s,
+                delta=delta_val
+            )
 
         # Record telemetry metrics for the completed round
         telemetry_store["rounds_data"].append({
             "round": active_round,
             "accuracy": real_acc,
             "loss": real_loss,
-            "placeholder_epsilon": round(new_epsilon, 2),
             "server_agg_ms": agg_ms,
             "global_weights": [round(float(w), 4) for w in current_weights]
         })
@@ -231,7 +258,7 @@ def configure_simulation(params: CoordinatorConfigRequest):
     telemetry_store["total_rounds"] = params.num_rounds
     telemetry_store["current_round"] = 1
     telemetry_store["expected_clients"] = params.num_clients
-    telemetry_store["placeholder_epsilon"] = 0.0
+    telemetry_store["epsilon_note"] = "See /api/privacy-log for real per-client epsilon values"
     telemetry_store["current_weights"] = [round(float(w), 4) for w in current_weights]
     telemetry_store["rounds_data"] = []
     telemetry_store["clients_status"] = [

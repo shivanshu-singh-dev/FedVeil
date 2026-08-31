@@ -97,6 +97,8 @@ def run_client_round(
         "client_id": client_id,
         "round": active_round,
         "payload": serialized_payload,
+        "clip_bound": clip_bound,
+        "noise_scale": noise_scale,
         "raw_slice_preview": [float(x) for x in noisy_delta[:4]],
         "compute_ms": compute_duration_ms
     }
