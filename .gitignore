@@ -2,10 +2,18 @@
 venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Node & Frontend Build Artifacts
+node_modules/
 frontend/node_modules/
 frontend/dist/
+
+# Environment & Local Secrets
+.env
+
+# Local Database Files
+data/privacy_log.db
 
 # OS Specific
 .DS_Store
