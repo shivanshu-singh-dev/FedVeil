@@ -1,9 +1,12 @@
 import os
 import time
 import secrets
+import datetime
 import numpy as np
-from fastapi import FastAPI, HTTPException, Header
+import jwt
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 
@@ -15,8 +18,21 @@ from src.dp.privacy_accountant import compute_epsilon
 from src.storage.db_connection import init_tables
 from src.storage.privacy_log_db import log_epsilon, get_cumulative_epsilon, get_all_privacy_logs
 from src.storage.client_registry_db import register_client, is_valid_client, list_clients
+from src.storage.rounds_db import log_round, get_latest_round
+from src.storage.admin_db import verify_admin_credentials
 
-# Initialize database tables in RDS Postgres on startup
+# ── JWT secret — required at startup ────────────────────────────────────────
+_jwt_secret = os.environ.get("JWT_SECRET")
+if not _jwt_secret:
+    raise RuntimeError(
+        "Missing required environment variable: JWT_SECRET. "
+        "Set this to a long random string before starting the server."
+    )
+JWT_SECRET: str = _jwt_secret
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = 12
+
+# ── Initialize database tables in RDS Postgres on startup ───────────────────
 init_tables()
 
 app = FastAPI(title="FedVeil Coordinator Engine", version="1.0.0")
@@ -30,21 +46,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Admin authentication secret
-ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "dev-admin-key-change-me")
+# ── Bearer token auth dependency ─────────────────────────────────────────────
+_bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def verify_admin_key(x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")):
-    """Validates the X-Admin-Key header against ADMIN_SECRET."""
-    if not x_admin_key or not secrets.compare_digest(x_admin_key, ADMIN_SECRET):
+def verify_admin_token(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+):
+    """
+    Validates the Authorization: Bearer <token> header.
+    Raises 401 if the token is missing, expired, or has an invalid signature.
+    """
+    if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=401,
-            detail="Unauthorized: Invalid or missing X-Admin-Key header."
+            detail="Unauthorized: Bearer token required."
         )
-    return x_admin_key
+    try:
+        payload = jwt.decode(
+            credentials.credentials,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM]
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Unauthorized: Token has expired.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid token.")
+    return payload
 
 
-# Load test dataset for model evaluation on server
+# ── Load test dataset for model evaluation on server ────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TEST_DATA_PATH = os.path.join(BASE_DIR, "data", "server_test.npz")
 
@@ -56,11 +87,17 @@ else:
     X_test, y_test = None, None
     VECTOR_SIZE = 31
 
-# Key custody: coordinator holds Paillier keypair
+# ── Key custody: coordinator holds Paillier keypair ──────────────────────────
 pub_key, priv_key = paillier.generate_paillier_keypair(n_length=1024)
 
-# Global weights initialization
-current_weights = np.zeros(VECTOR_SIZE)
+# ── Restore persisted state from RDS on startup ──────────────────────────────
+_latest_round = get_latest_round()
+if _latest_round is not None:
+    current_weights = np.array(_latest_round["global_weights"], dtype=float)
+    _restored_round = _latest_round["round"] + 1
+else:
+    current_weights = np.zeros(VECTOR_SIZE)
+    _restored_round = 1
 
 # Submissions buffer for current active round: {client_id: UpdateSubmission}
 current_round_submissions: Dict[str, Any] = {}
@@ -69,7 +106,7 @@ current_round_submissions: Dict[str, Any] = {}
 telemetry_store: Dict[str, Any] = {
     "status": "waiting_for_updates",
     "total_rounds": 5,
-    "current_round": 1,
+    "current_round": _restored_round,
     "expected_clients": 3,
     "epsilon_note": "See /api/privacy-log for real per-client epsilon values",
     "current_weights": [round(float(w), 4) for w in current_weights],
@@ -83,6 +120,13 @@ telemetry_store: Dict[str, Any] = {
         "n": str(pub_key.n)
     }
 }
+
+
+# ── Pydantic models ──────────────────────────────────────────────────────────
+
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 class RegisterClientRequest(BaseModel):
@@ -108,6 +152,8 @@ class CoordinatorConfigRequest(BaseModel):
     vector_size: int = VECTOR_SIZE
 
 
+# ── Routes ───────────────────────────────────────────────────────────────────
+
 @app.get("/api/telemetry")
 def get_telemetry():
     """Returns current telemetry state for frontend monitoring and clients."""
@@ -132,13 +178,30 @@ def get_privacy_log():
     return get_all_privacy_logs()
 
 
+@app.post("/api/admin/login")
+def admin_login(req: AdminLoginRequest):
+    """
+    Authenticates an admin and returns a signed JWT on success.
+    Returns 401 on wrong credentials.
+    """
+    if not verify_admin_credentials(req.username, req.password):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    expire = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=JWT_EXPIRE_HOURS)
+    token_payload = {
+        "sub": req.username,
+        "exp": expire
+    }
+    token = jwt.encode(token_payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return {"token": token}
+
+
 @app.post("/api/admin/register-client")
 def admin_register_client(
     req: RegisterClientRequest,
-    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")
+    _token: dict = Depends(verify_admin_token)
 ):
     """Admin endpoint to register a new client and generate its API key."""
-    verify_admin_key(x_admin_key)
     try:
         api_key = register_client(client_id=req.client_id, name=req.name)
     except ValueError as e:
@@ -152,11 +215,8 @@ def admin_register_client(
 
 
 @app.get("/api/admin/clients")
-def admin_get_clients(
-    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")
-):
+def admin_get_clients(_token: dict = Depends(verify_admin_token)):
     """Admin endpoint to list all registered clients with cumulative epsilon totals."""
-    verify_admin_key(x_admin_key)
     clients = list_clients()
     for c in clients:
         c["cumulative_epsilon"] = get_cumulative_epsilon(c["client_id"])
@@ -169,8 +229,8 @@ def submit_update(submission: UpdateSubmission):
     Accepts one client's serialized encrypted payload for the current round.
     Authenticates client credentials before processing.
     Once submissions from expected clients are received, aggregates, decrypts,
-    persists per-client privacy accounting, updates telemetry_store, evaluates
-    the real model, and advances the round.
+    persists per-client privacy accounting and round state, updates telemetry_store,
+    evaluates the real model, and advances the round.
     """
     global current_weights, current_round_submissions, telemetry_store
 
@@ -248,7 +308,7 @@ def submit_update(submission: UpdateSubmission):
             real_acc = None
             real_loss = None
 
-        # Real Privacy Accounting per client -> SQLite log
+        # Real Privacy Accounting per client -> RDS log
         for cid, sub in current_round_submissions.items():
             clip_b = sub.clip_bound if sub.clip_bound is not None else 1.0
             noise_s = sub.noise_scale if sub.noise_scale is not None else 0.05
@@ -267,6 +327,15 @@ def submit_update(submission: UpdateSubmission):
                 noise_scale=noise_s,
                 delta=delta_val
             )
+
+        # Persist round result to RDS
+        log_round(
+            round=active_round,
+            global_weights=[float(w) for w in current_weights],
+            accuracy=real_acc,
+            loss=real_loss,
+            agg_ms=agg_ms
+        )
 
         # Record telemetry metrics for the completed round
         telemetry_store["rounds_data"].append({

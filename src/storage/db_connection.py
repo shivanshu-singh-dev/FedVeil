@@ -44,8 +44,8 @@ def get_connection():
 
 def init_tables():
     """
-    Initializes required Postgres tables (clients and privacy_log) if they do not exist.
-    Safe and idempotent to call on server startup.
+    Initializes required Postgres tables (clients, privacy_log, rounds, admins)
+    if they do not exist. Safe and idempotent to call on server startup.
     """
     conn = get_connection()
     with conn:
@@ -69,6 +69,24 @@ def init_tables():
                     noise_scale REAL,
                     delta REAL,
                     logged_at TEXT
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS rounds (
+                    round INTEGER PRIMARY KEY,
+                    global_weights JSONB,
+                    accuracy REAL,
+                    loss REAL,
+                    agg_ms REAL,
+                    logged_at TEXT
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS admins (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT
                 );
             """)
     conn.close()

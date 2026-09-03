@@ -11,6 +11,8 @@ frontend/dist/
 
 # Environment & Local Secrets
 .env
+.env.*
+*.db
 
 # OS Specific
 .DS_Store
