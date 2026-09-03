@@ -15,7 +15,7 @@ from src.crypto.serializer import serialize_payload, deserialize_payload
 from src.server.aggregator import aggregate_ciphertexts
 from src.model.logistic_regression import evaluate
 from src.dp.privacy_accountant import compute_epsilon
-from src.storage.db_connection import init_tables
+from src.storage.db_connection import init_tables, get_connection
 from src.storage.privacy_log_db import log_epsilon, get_cumulative_epsilon, get_all_privacy_logs
 from src.storage.client_registry_db import register_client, is_valid_client, list_clients
 from src.storage.rounds_db import log_round, get_latest_round
@@ -97,7 +97,7 @@ if _latest_round is not None:
     _restored_round = _latest_round["round"] + 1
 else:
     current_weights = np.zeros(VECTOR_SIZE)
-    _restored_round = 1
+    _restored_round = 0  # Starts at 0 when no prior rounds exist
 
 # Submissions buffer for current active round: {client_id: UpdateSubmission}
 current_round_submissions: Dict[str, Any] = {}
@@ -220,21 +220,40 @@ def admin_get_clients(_token: dict = Depends(verify_admin_token)):
     clients = list_clients()
     for c in clients:
         c["cumulative_epsilon"] = get_cumulative_epsilon(c["client_id"])
-    return clients
+    return {"clients": clients}
+
+
+@app.delete("/api/admin/reset")
+def admin_reset_database(_token: dict = Depends(verify_admin_token)):
+    """Wipes all clients, rounds, and privacy logs, and resets memory state."""
+    global current_weights, current_round_submissions, telemetry_store
+    
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM privacy_log;")
+                cur.execute("DELETE FROM clients;")
+                cur.execute("DELETE FROM rounds;")
+    finally:
+        conn.close()
+
+    # Reset in-memory states completely (Round resets to 0)
+    current_round_submissions.clear()
+    current_weights = np.zeros(VECTOR_SIZE)
+    telemetry_store["status"] = "waiting_for_updates"
+    telemetry_store["current_round"] = 0
+    telemetry_store["current_weights"] = [0.0] * VECTOR_SIZE
+    telemetry_store["rounds_data"] = []
+    telemetry_store["clients_status"] = []
+
+    return {"status": "reset_successful", "message": "All database records and session states wiped."}
 
 
 @app.post("/api/submit-update")
 def submit_update(submission: UpdateSubmission):
-    """
-    Accepts one client's serialized encrypted payload for the current round.
-    Authenticates client credentials before processing.
-    Once submissions from expected clients are received, aggregates, decrypts,
-    persists per-client privacy accounting and round state, updates telemetry_store,
-    evaluates the real model, and advances the round.
-    """
     global current_weights, current_round_submissions, telemetry_store
 
-    # 1. Authenticate client credentials before processing
     if not is_valid_client(submission.client_id, submission.api_key):
         raise HTTPException(
             status_code=401,
@@ -253,7 +272,6 @@ def submit_update(submission: UpdateSubmission):
     is_resubmission = cid_str in current_round_submissions
     current_round_submissions[cid_str] = submission
 
-    # Update or add client in clients_status
     client_entry = next((c for c in telemetry_store["clients_status"] if str(c["id"]) == cid_str), None)
     if client_entry:
         client_entry["status"] = "Update Received"
@@ -267,25 +285,12 @@ def submit_update(submission: UpdateSubmission):
             "last_latency_ms": round(submission.compute_ms or 0.0, 2)
         })
 
-    # Update frontend sample preview if on round 1
-    if active_round == 1:
-        if submission.raw_slice_preview:
-            telemetry_store["sample_payload_inspect"]["raw_slice"] = [
-                round(float(x), 4) for x in submission.raw_slice_preview[:4]
-            ]
-        if submission.payload:
-            telemetry_store["sample_payload_inspect"]["ciphertext_preview"] = (
-                submission.payload[:160] + " ... [TRUNCATED]"
-            )
-
     received_count = len(current_round_submissions)
     expected_count = telemetry_store["expected_clients"]
 
-    # If all expected clients have submitted, aggregate and advance round
     if received_count >= expected_count:
         t0_agg = time.time()
 
-        # Deserialization & HE Aggregation
         deserialized_vectors = [
             deserialize_payload(sub.payload)[1]
             for sub in current_round_submissions.values()
@@ -293,13 +298,11 @@ def submit_update(submission: UpdateSubmission):
         encrypted_sum = aggregate_ciphertexts(deserialized_vectors)
         agg_ms = round((time.time() - t0_agg) * 1000, 2)
 
-        # Decryption & Global Weights Update
         decrypted_sum = np.array([priv_key.decrypt(x) for x in encrypted_sum])
         averaged_delta = decrypted_sum / expected_count
         current_weights = current_weights + averaged_delta
         telemetry_store["current_weights"] = [round(float(w), 4) for w in current_weights]
 
-        # Real test set evaluation
         if X_test is not None and y_test is not None:
             acc, loss = evaluate(X_test, y_test, current_weights)
             real_acc = round(acc, 2)
@@ -308,7 +311,6 @@ def submit_update(submission: UpdateSubmission):
             real_acc = None
             real_loss = None
 
-        # Real Privacy Accounting per client -> RDS log
         for cid, sub in current_round_submissions.items():
             clip_b = sub.clip_bound if sub.clip_bound is not None else 1.0
             noise_s = sub.noise_scale if sub.noise_scale is not None else 0.05
@@ -328,7 +330,6 @@ def submit_update(submission: UpdateSubmission):
                 delta=delta_val
             )
 
-        # Persist round result to RDS
         log_round(
             round=active_round,
             global_weights=[float(w) for w in current_weights],
@@ -337,7 +338,6 @@ def submit_update(submission: UpdateSubmission):
             agg_ms=agg_ms
         )
 
-        # Record telemetry metrics for the completed round
         telemetry_store["rounds_data"].append({
             "round": active_round,
             "accuracy": real_acc,
@@ -346,7 +346,6 @@ def submit_update(submission: UpdateSubmission):
             "global_weights": [round(float(w), 4) for w in current_weights]
         })
 
-        # Advance round or mark completed
         current_round_submissions.clear()
         if active_round >= telemetry_store["total_rounds"]:
             telemetry_store["status"] = "completed"
@@ -365,6 +364,7 @@ def submit_update(submission: UpdateSubmission):
             "agg_ms": agg_ms,
             "accuracy": real_acc,
             "loss": real_loss,
+            "current_weights": telemetry_store["current_weights"],
             "replaced_previous_submission": is_resubmission
         }
 
@@ -373,51 +373,8 @@ def submit_update(submission: UpdateSubmission):
         "round": active_round,
         "received": received_count,
         "expected": expected_count,
+        "current_weights": telemetry_store["current_weights"],
         "replaced_previous_submission": is_resubmission
-    }
-
-
-@app.post("/api/run-simulation")
-def configure_simulation(params: CoordinatorConfigRequest):
-    """
-    Resets/configures the coordinator session parameters without generating client data.
-    Clients must submit updates independently via POST /api/submit-update.
-    """
-    global current_weights, current_round_submissions, telemetry_store
-
-    current_round_submissions.clear()
-    current_weights = np.zeros(VECTOR_SIZE)
-
-    telemetry_store["status"] = "waiting_for_updates"
-    telemetry_store["total_rounds"] = params.num_rounds
-    telemetry_store["current_round"] = 1
-    telemetry_store["expected_clients"] = params.num_clients
-    telemetry_store["epsilon_note"] = "See /api/privacy-log for real per-client epsilon values"
-    telemetry_store["current_weights"] = [round(float(w), 4) for w in current_weights]
-    telemetry_store["rounds_data"] = []
-    telemetry_store["clients_status"] = []
-    telemetry_store["sample_payload_inspect"] = {
-        "raw_slice": [],
-        "ciphertext_preview": ""
-    }
-
-    return {
-        "status": "configured",
-        "config": params,
-        "current_round": 1
-    }
-
-
-@app.post("/api/predict")
-def predict_sample(payload: Dict[str, Any]):
-    """Inference endpoint for the frontend demo sandbox."""
-    features = payload.get("features", [0.5, 0.2, -0.1, 0.8])
-    score = float(1 / (1 + np.exp(-np.sum(features))))
-    label = "Positive / High Probability" if score > 0.5 else "Negative / Normal"
-    return {
-        "prediction": label,
-        "confidence": round(score if score > 0.5 else 1 - score, 4),
-        "features_processed": len(features)
     }
 
 
