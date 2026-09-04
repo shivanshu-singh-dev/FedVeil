@@ -296,7 +296,7 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Simplified Registered Clients Table */}
+              {/* Simplified Registered Clients Table with Epsilon Column Added Back */}
               <div>
                 <div className="border rounded-lg overflow-hidden">
                   <table className="w-full text-left border-collapse text-sm">
@@ -304,6 +304,7 @@ export default function App() {
                       <tr className="bg-gray-100 border-b text-gray-600">
                         <th className="p-3 font-semibold">Client ID</th>
                         <th className="p-3 font-semibold">Node Name</th>
+                        <th className="p-3 font-semibold">Cumulative ε</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -311,11 +312,14 @@ export default function App() {
                         <tr key={c.client_id} className="border-b hover:bg-gray-50">
                           <td className="p-3 font-mono font-bold text-blue-600">{c.client_id}</td>
                           <td className="p-3 text-gray-800">{c.name}</td>
+                          <td className="p-3 text-orange-600 font-mono font-semibold">
+                            {c.cumulative_epsilon !== undefined && c.cumulative_epsilon !== null ? Number(c.cumulative_epsilon).toFixed(4) : '0.0000'}
+                          </td>
                         </tr>
                       ))}
                       {adminClients.length === 0 && (
                         <tr>
-                          <td colSpan="2" className="p-4 text-center text-gray-400 italic">No client nodes registered yet.</td>
+                          <td colSpan="3" className="p-4 text-center text-gray-400 italic">No client nodes registered yet.</td>
                         </tr>
                       )}
                     </tbody>
