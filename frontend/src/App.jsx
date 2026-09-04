@@ -12,7 +12,7 @@ export default function App() {
   const [telemetry, setTelemetry] = useState(null);
   const [adminClients, setAdminClients] = useState([]);
 
-  // Client Console State
+  // Client Console State with status tracking
   const [clients, setClients] = useState([
     { id: '1', apiKey: '', log: 'Ready for training.', status: 'Idle', weights: [] },
     { id: '2', apiKey: '', log: 'Ready for training.', status: 'Idle', weights: [] },
@@ -224,6 +224,27 @@ export default function App() {
             <div className="bg-green-50 p-4 rounded text-green-800 border border-green-200 flex justify-between items-center">
               <span>Logged in securely via JWT.</span>
               <div className="space-x-4">
+                {/* New Reset Rounds Button */}
+                <button 
+                  onClick={async () => {
+                    if (confirm("Are you sure you want to reset training rounds to 0? (Clients will remain registered)")) {
+                      const res = await fetch(`${API_BASE}/api/admin/reset-rounds`, {
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${token}` }
+                      });
+                      if (res.ok) {
+                        alert("Rounds reset to 0 successfully!");
+                        // Clear the client logs on the frontend without refreshing the page
+                        setClients(prev => prev.map(c => ({...c, log: 'Ready for training.', status: 'Idle', weights: []})));
+                      }
+                    }
+                  }}
+                  className="bg-yellow-500 text-white px-3 py-1 rounded text-sm font-semibold hover:bg-yellow-600 transition"
+                >
+                  Reset Rounds
+                </button>
+
+                {/* Existing Hard Reset Button */}
                 <button 
                   onClick={async () => {
                     if (confirm("Are you sure you want to wipe all clients, rounds, and logs?")) {
@@ -232,14 +253,16 @@ export default function App() {
                         headers: { 'Authorization': `Bearer ${token}` }
                       });
                       if (res.ok) {
-                        alert("Database reset successfully!");
-                        window.location.reload();
+                        alert("Database wiped successfully!");
+                        // Clear admin clients and local client states
+                        setAdminClients([]);
+                        setClients(prev => prev.map(c => ({...c, apiKey: '', log: 'Ready for training.', status: 'Idle', weights: []})));
                       }
                     }
                   }}
                   className="bg-red-600 text-white px-3 py-1 rounded text-sm font-semibold hover:bg-red-700 transition"
                 >
-                  Reset Database
+                  Hard Reset
                 </button>
                 <button onClick={() => setToken(null)} className="text-sm font-bold underline hover:text-green-900">Logout</button>
               </div>

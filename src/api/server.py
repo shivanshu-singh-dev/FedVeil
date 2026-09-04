@@ -249,6 +249,32 @@ def admin_reset_database(_token: dict = Depends(verify_admin_token)):
 
     return {"status": "reset_successful", "message": "All database records and session states wiped."}
 
+@app.delete("/api/admin/reset-rounds")
+def admin_reset_rounds(_token: dict = Depends(verify_admin_token)):
+    """Wipes only rounds and privacy logs, keeps registered clients intact."""
+    global current_weights, current_round_submissions, telemetry_store
+    
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM privacy_log;")
+                cur.execute("DELETE FROM rounds;")
+    finally:
+        conn.close()
+
+    # Reset in-memory states for training rounds (starts at 0)
+    current_round_submissions.clear()
+    current_weights = np.zeros(VECTOR_SIZE)
+    telemetry_store["status"] = "waiting_for_updates"
+    telemetry_store["current_round"] = 0
+    telemetry_store["current_weights"] = [0.0] * VECTOR_SIZE
+    telemetry_store["rounds_data"] = []
+    
+    for c in telemetry_store["clients_status"]:
+        c["status"] = "Idle"
+
+    return {"status": "success", "message": "Training rounds reset to 0."}
 
 @app.post("/api/submit-update")
 def submit_update(submission: UpdateSubmission):
