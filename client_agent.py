@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
@@ -22,32 +22,9 @@ class ClientConfig(BaseModel):
     client_id: str
     api_key: str
 
-class RoundRequest(BaseModel):
-    client_id: str
-    api_key: str
-    server_url: str = "http://127.0.0.1:8000"
-
 class RunAllRequest(BaseModel):
     clients: List[ClientConfig]
     server_url: str = "http://127.0.0.1:8000"
-
-@app.post("/run-round")
-def run_round(req: RoundRequest):
-    """Runs a single federated learning round for one specific client."""
-    try:
-        resp = run_client_round(
-            client_id=req.client_id,
-            api_key=req.api_key,
-            server_url=req.server_url
-        )
-        return {
-            "status": "success", 
-            "client_id": req.client_id, 
-            "log": f"Client {req.client_id} training & encryption completed.",
-            "server_response": resp
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/run-all")
 def run_all(req: RunAllRequest):

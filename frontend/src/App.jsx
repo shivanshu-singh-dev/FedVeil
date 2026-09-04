@@ -37,7 +37,7 @@ export default function App() {
     tabInactive: isDark ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300',
     tableHead: isDark ? 'bg-gray-900 border-gray-700 text-gray-300' : 'bg-gray-100 border-b text-gray-600',
     tableRow: isDark ? 'border-gray-700 hover:bg-gray-700/50' : 'border-b hover:bg-gray-50',
-    terminal: 'bg-slate-900 text-green-400 border border-transparent' // Keeping the log box looking like a standard terminal
+    terminal: 'bg-slate-900 text-green-400 border border-transparent'
   };
 
   useEffect(() => {
@@ -60,6 +60,11 @@ export default function App() {
       const res = await fetch(`${API_BASE}/api/admin/clients`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
+      // Handle expired or invalid JWT token automatically
+      if (res.status === 401) {
+        setToken(null);
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         setAdminClients(data.clients || []);
@@ -278,6 +283,7 @@ export default function App() {
                         method: 'DELETE',
                         headers: { 'Authorization': `Bearer ${token}` }
                       });
+                      if (res.status === 401) { setToken(null); return; }
                       if (res.ok) {
                         alert("Rounds reset to 0 successfully!");
                         setClients(prev => prev.map(c => ({...c, log: '> Ready for training.', status: 'Idle', weights: []})));
@@ -296,6 +302,7 @@ export default function App() {
                         method: 'DELETE',
                         headers: { 'Authorization': `Bearer ${token}` }
                       });
+                      if (res.status === 401) { setToken(null); return; }
                       if (res.ok) {
                         alert("Database wiped successfully!");
                         setAdminClients([]);
